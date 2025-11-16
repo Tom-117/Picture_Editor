@@ -134,11 +134,6 @@ pyrightconfig.json
 
 
 .vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-!.vscode/*.code-snippets
 
 # Local History for Visual Studio Code
 .history/
@@ -150,3 +145,5 @@ pyrightconfig.json
 # Ignore all local history of files
 .history
 .ionide
+.vscode/launch.json
+.vscode/tasks.json
