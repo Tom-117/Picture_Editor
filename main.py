@@ -204,3 +204,127 @@ class PictureEditor(ctk.CTk):
             self.draw.ellipse([img_x - self.draw_size/2, img_y - self.draw_size/2,
                                img_x + self.draw_size/2, img_y + self.draw_size/2], fill=color)
             self.update_image_display()
+
+    def on_drag(self, event):
+        if not self.current_image:
+            return
+
+        if self.is_panning:
+            dx = event.x - self.last_x
+            dy = event.y - self.last_y
+            self.pan_x += dx
+            self.pan_y += dy
+            self.last_x, self.last_y = event.x, event.y
+            self.update_image_display()
+            return
+
+        if not self.drawing:
+            return
+
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        img_x = canvas_x / self.zoom_factor + self.pan_x / self.zoom_factor
+        img_y = canvas_y / self.zoom_factor + self.pan_y / self.zoom_factor
+
+        tool = self.tool_var.get()
+        color = "white" if tool == "eraser" else self.draw_color
+
+        if tool in ["brush", "eraser"]:
+            self.draw.line([self.last_x, self.last_y, img_x, img_y], fill=color, width=self.draw_size)
+            self.draw.ellipse([img_x - self.draw_size/2, img_y - self.draw_size/2,
+                               img_x + self.draw_size/2, img_y + self.draw_size/2], fill=color)
+        self.last_x, self.last_y = img_x, img_y
+        self.update_image_display()
+
+    def on_release(self, event):
+        self.is_panning = False
+        if not self.current_image or not self.drawing or not hasattr(self, 'start_x'):
+            return
+
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        img_x = canvas_x / self.zoom_factor + self.pan_x / self.zoom_factor
+        img_y = canvas_y / self.zoom_factor + self.pan_y / self.zoom_factor
+
+        tool = self.tool_var.get()
+        color = "white" if tool == "eraser" else self.draw_color
+        fill_color = color + "FF" if self.fill_var.get() and tool != "eraser" else None
+
+        if tool == "line":
+            self.draw.line([self.start_x, self.start_y, img_x, img_y], fill=color, width=self.draw_size)
+        elif tool == "rectangle":
+            self.draw.rectangle([min(self.start_x, img_x), min(self.start_y, img_y),
+                                 max(self.start_x, img_x), max(self.start_y, img_y)],
+                                outline=color, width=self.draw_size, fill=fill_color)
+        elif tool == "circle":
+            # Ellipszis a két pont között (keret)
+            bbox = [min(self.start_x, img_x), min(self.start_y, img_y),
+                    max(self.start_x, img_x), max(self.start_y, img_y)]
+            self.draw.ellipse(bbox, outline=color, width=self.draw_size, fill=fill_color)
+
+        self.finalize_drawing()
+
+    def place_text_at(self, x, y):
+        text = self.text_input.get().strip()
+        if not text:
+            return
+        size = simpledialog.askinteger("Betűméret", "Méret (10-200):", minvalue=10, maxvalue=200, initialvalue=50)
+        if not size:
+            return
+        try:
+            font = ImageFont.truetype("arial.ttf", size)
+        except:
+            font = ImageFont.load_default()
+        overlay = Image.new("RGBA", self.current_image.size, (0,0,0,0))
+        draw = ImageDraw.Draw(overlay)
+        draw.text((x, y), text, font=font, fill=self.text_color + "FF",
+                  stroke_width=4, stroke_fill="black", anchor="mm")
+        self.current_image = Image.alpha_composite(self.current_image.convert("RGBA"), overlay).convert("RGB")
+        self.save_state()
+        self.update_image_display()
+
+    
+    def open_image(self):
+        path = filedialog.askopenfilename(filetypes=[("Képek", "*.png *.jpg *.jpeg *.bmp *.tiff *.webp")])
+        if path:
+            try:
+                self.original_image = Image.open(path).convert("RGB")
+                self.current_image = self.original_image.copy()
+                self.history = [np.array(self.current_image)]
+                self.history_index = 0
+                self.zoom_factor = 1.0
+                self.pan_x = self.pan_y = 0
+                self.update_image_display()
+                messagebox.showinfo("Siker!", "Kép betöltve!")
+            except Exception as e:
+                messagebox.showerror("Hiba", f"Nem sikerült betölteni: {e}")
+
+    def save_state(self):
+        if self.current_image:
+            self.history = self.history[:self.history_index + 1]
+            self.history.append(np.array(self.current_image))
+            self.history_index += 1
+            if len(self.history) > 30:
+                self.history.pop(0)
+                self.history_index -= 1
+
+    def undo(self):
+        if self.history_index > 0:
+            self.history_index -= 1
+            self.current_image = Image.fromarray(self.history[self.history_index])
+            self.update_image_display()
+
+    def redo(self):
+        if self.history_index < len(self.history) - 1:
+            self.history_index += 1
+            self.current_image = Image.fromarray(self.history[self.history_index])
+            self.update_image_display()
+
+    def reset_image(self):
+        if self.original_image:
+            self.current_image = self.original_image.copy()
+            self.history = [np.array(self.current_image)]
+            self.history_index = 0
+            self.zoom_factor = 1.0
+            self.pan_x = self.pan_y = 0
+            self.update_image_display()
