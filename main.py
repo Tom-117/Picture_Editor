@@ -328,3 +328,56 @@ class PictureEditor(ctk.CTk):
             self.zoom_factor = 1.0
             self.pan_x = self.pan_y = 0
             self.update_image_display()
+    
+    def update_image_display(self):
+        if not self.current_image:
+            self.canvas.delete("all")
+            self.canvas.create_text(500, 300, text="Nyiss meg egy képet a bal oldali gombbal!", fill="gray", font=("Arial", 24))
+            return
+
+        img = self.current_image.copy()
+        if self.draw_overlay:
+            img = Image.alpha_composite(img.convert("RGBA"), self.draw_overlay).convert("RGB")
+
+        w = int(img.width * self.zoom_factor)
+        h = int(img.height * self.zoom_factor)
+        self.display_image = img.resize((w, h), Image.Resampling.LANCZOS)
+        self.photo = ImageTk.PhotoImage(self.display_image)
+
+        self.canvas.delete("all")
+        self.canvas.config(scrollregion=(0, 0, w, h))
+        self.canvas.create_image(self.pan_x, self.pan_y, image=self.photo, anchor="nw")
+
+    def on_mousewheel(self, event):
+        if event.delta > 0:
+            self.zoom(1.1)
+        else:
+            self.zoom(0.9)
+
+    def zoom(self, factor):
+        old = self.zoom_factor
+        self.zoom_factor = max(0.1, min(self.zoom_factor * factor, 10))
+        if self.zoom_factor != old:
+            self.update_image_display()
+
+    def save_image(self):
+        if not self.current_image:
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg")])
+        if path:
+            self.current_image.save(path)
+            messagebox.showinfo("Mentve", f"Kép elmentve: {os.path.basename(path)}")
+
+    def remove_background(self):
+        if not self.current_image:
+            return
+        self.save_state()
+        try:
+            session = new_session("u2net")
+            output = remove(self.current_image, session=session)
+            bg = Image.new("RGB", output.size, (255, 255, 255))
+            self.current_image = Image.alpha_composite(bg.convert("RGBA"), output.convert("RGBA")).convert("RGB")
+            self.update_image_display()
+            messagebox.showinfo("Kész!", "Háttér sikeresen eltávolítva!")
+        except Exception as e:
+            messagebox.showerror("Hiba", f"Háttéreltávolítás sikertelen: {e}")
