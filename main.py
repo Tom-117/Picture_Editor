@@ -381,3 +381,49 @@ class PictureEditor(ctk.CTk):
             messagebox.showinfo("Kész!", "Háttér sikeresen eltávolítva!")
         except Exception as e:
             messagebox.showerror("Hiba", f"Háttéreltávolítás sikertelen: {e}")
+    
+    def extract_text(self):
+        if not self.current_image:
+            return
+        try:
+            text = pytesseract.image_to_string(self.current_image, lang='hun+eng')
+            win = ctk.CTkToplevel(self)
+            win.title("Kinyert szöveg (OCR)")
+            win.geometry("800x600")
+            txt = ctk.CTkTextbox(win, wrap="word")
+            txt.pack(fill="both", expand=True, padx=10, pady=10)
+            txt.insert("end", text if text.strip() else "(Nincs felismerhető szöveg)")
+            win.mainloop()
+        except Exception as e:
+            messagebox.showerror("Hiba", f"OCR sikertelen: {e}")
+
+    
+    def apply_filter(self, func):
+        if not self.current_image:
+            return
+        self.save_state()
+        img = cv2.cvtColor(np.array(self.current_image), cv2.COLOR_RGB2BGR)
+        result = func(img)
+        if len(result.shape) == 2:
+            result = cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
+        self.current_image = Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+        self.update_image_display()
+
+    def apply_grayscale(self): self.apply_filter(lambda x: cv2.cvtColor(x, cv2.COLOR_BGR2GRAY))
+    def apply_blur(self): self.apply_filter(lambda x: cv2.GaussianBlur(x, (25,25), 0))
+    def apply_sharpen(self): self.apply_filter(lambda x: cv2.filter2D(x, -1, np.array([[-1,-1,-1],[-1,9,-1],[-1,-1,-1]])))
+    def apply_sepia(self): 
+        self.apply_filter(lambda x: (cv2.transform(x, np.array([[0.272,0.534,0.131],[0.349,0.686,0.168],[0.393,0.769,0.189]], dtype=np.float32)) * 1.1).clip(0,255).astype(np.uint8))
+    def apply_vintage(self): self.apply_filter(lambda x: cv2.add(x, np.random.randint(0,40,(x.shape[0],x.shape[1],3),dtype=np.uint8)))
+
+    def rotate(self, angle):
+        if self.current_image:
+            self.save_state()
+            self.current_image = self.current_image.rotate(-angle, expand=True)
+            self.update_image_display()
+
+    def flip_horizontal(self):
+        if self.current_image:
+            self.save_state()
+            self.current_image = ImageOps.mirror(self.current_image)
+            self.update_image_display()
