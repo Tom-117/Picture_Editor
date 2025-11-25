@@ -257,7 +257,7 @@ class PictureEditor(ctk.CTk):
                                  max(self.start_x, img_x), max(self.start_y, img_y)],
                                 outline=color, width=self.draw_size, fill=fill_color)
         elif tool == "circle":
-            # Ellipszis a két pont között (keret)
+            # Ellipszis a két pont között
             bbox = [min(self.start_x, img_x), min(self.start_y, img_y),
                     max(self.start_x, img_x), max(self.start_y, img_y)]
             self.draw.ellipse(bbox, outline=color, width=self.draw_size, fill=fill_color)
@@ -427,3 +427,19 @@ class PictureEditor(ctk.CTk):
             self.save_state()
             self.current_image = ImageOps.mirror(self.current_image)
             self.update_image_display()
+    def resize_image(self):
+        if not self.current_image:
+            return
+        w = simpledialog.askinteger("Szélesség", f"Új szélesség (jelenleg: {self.current_image.width}):", minvalue=1)
+        if not w:
+            return
+        h = simpledialog.askinteger("Magasság", f"Új magasság (jelenleg: {self.current_image.height}):", minvalue=1)
+        if not h:
+            return
+        self.save_state()
+        self.current_image = self.current_image.resize((w, h), Image.Resampling.LANCZOS)
+        self.update_image_display()
+
+if __name__ == "__main__":
+    app = PictureEditor()
+    app.mainloop()
