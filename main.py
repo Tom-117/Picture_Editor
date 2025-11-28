@@ -10,8 +10,7 @@ import io
 from rembg import remove, new_session
 
 
-pytesseract.pytesseract.tesseract_cmd #= Put your tesseract executable path here if you want OCR to work
-
+pytesseract.pytesseract.tesseract_cmd = os.getenv('TESSERACT_CMD', '/usr/bin/tesseract')
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
@@ -19,9 +18,10 @@ class PictureEditor(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Picture_Editor")
-        self.geometry("1400x900")
+        self.geometry("1920x1080")
         self.minsize(1100, 650)
-
+        self.has_transparency = False
+        self.bg_color = "#808080" 
        
         self.original_image = None
         self.current_image = None
@@ -36,6 +36,7 @@ class PictureEditor(ctk.CTk):
         
         self.drawing = False
         self.draw_overlay = None
+        self.permanent_drawings = None
         self.draw_color = "red"
         self.draw_size = 10
         self.tool_var = tk.StringVar(value="brush")
@@ -45,6 +46,11 @@ class PictureEditor(ctk.CTk):
         
         self.text_mode = tk.BooleanVar(value=False)
         self.text_color = "white"
+        
+        self.bg_removal_mode = False
+        self.bg_removal_method = None  
+        self.bg_selection_rect = None
+        self.bg_start_x = self.bg_start_y = None
 
         self.setup_ui()
         self.setup_bindings()
@@ -113,7 +119,7 @@ class PictureEditor(ctk.CTk):
             ctk.CTkButton(self.sidebar, text=name, command=cmd).pack(pady=3, padx=20, fill="x")
 
         ctk.CTkLabel(self.sidebar, text="AI & OCR", font=ctk.CTkFont(weight="bold")).pack(pady=(20,5), anchor="w", padx=20)
-        ctk.CTkButton(self.sidebar, text="Háttér eltávolítás (AI)", command=self.remove_background, fg_color="purple").pack(pady=8, padx=20, fill="x")
+        ctk.CTkButton(self.sidebar, text="Háttér eltávolítás (AI)", command=self.remove_background_grabcut, fg_color="purple").pack(pady=8, padx=20, fill="x")
         ctk.CTkButton(self.sidebar, text="Szöveg kinyerése (OCR)", command=self.extract_text).pack(pady=5, padx=20, fill="x")
 
         ctk.CTkLabel(self.sidebar, text="Visszaállítás", font=ctk.CTkFont(weight="bold")).pack(pady=(20,5), anchor="w", padx=20)
@@ -135,6 +141,9 @@ class PictureEditor(ctk.CTk):
         self.canvas.bind("<ButtonPress-1>", self.on_click)
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
+        self.canvas.bind("<ButtonPress-3>", self.on_right_click)
+        self.canvas.bind("<B3-Motion>", self.on_right_drag)
+        self.canvas.bind("<ButtonRelease-3>", self.on_right_release)
         self.canvas.bind("<MouseWheel>", self.on_mousewheel)
         self.canvas.bind("<Button-4>", lambda e: self.zoom(1.1))
         self.canvas.bind("<Button-5>", lambda e: self.zoom(0.9))
@@ -144,6 +153,28 @@ class PictureEditor(ctk.CTk):
         self.bind("<Control-o>", lambda e: self.open_image())
         self.bind("<Control-s>", lambda e: self.save_image())
 
+    def on_right_click(self, event):
+        """Handle right mouse button press for panning"""
+        self.is_panning = True
+        self.last_x = event.x
+        self.last_y = event.y
+        self.canvas.config(cursor="fleur")
+
+    def on_right_drag(self, event):
+        """Handle right mouse button drag for panning"""
+        if self.is_panning:
+            dx = event.x - self.last_x
+            dy = event.y - self.last_y
+            self.pan_x += dx
+            self.pan_y += dy
+            self.last_x = event.x
+            self.last_y = event.y
+            self.update_image_display()
+
+    def on_right_release(self, event):
+        """Handle right mouse button release"""
+        self.is_panning = False
+        self.canvas.config(cursor="")
 
     def toggle_drawing_mode(self):
         self.drawing = self.draw_enabled.get()
@@ -168,7 +199,12 @@ class PictureEditor(ctk.CTk):
 
     def finalize_drawing(self):
         if self.draw_overlay:
-            self.current_image = Image.alpha_composite(self.current_image.convert("RGBA"), self.draw_overlay).convert("RGB")
+            # Initialize permanent drawings layer if it doesn't exist
+            if self.permanent_drawings is None:
+                self.permanent_drawings = Image.new("RGBA", self.current_image.size, (0,0,0,0))
+
+            # Composite the new drawing onto the permanent layer
+            self.permanent_drawings = Image.alpha_composite(self.permanent_drawings, self.draw_overlay)
             self.draw_overlay = None
             self.save_state()
             self.update_image_display()
@@ -178,77 +214,150 @@ class PictureEditor(ctk.CTk):
             return
         canvas_x = self.canvas.canvasx(event.x)
         canvas_y = self.canvas.canvasy(event.y)
-        img_x = canvas_x / self.zoom_factor + self.pan_x / self.zoom_factor  
-        img_y = canvas_y / self.zoom_factor + self.pan_y / self.zoom_factor
+        img_x = (canvas_x - self.pan_x) / self.zoom_factor
+        img_y = (canvas_y - self.pan_y) / self.zoom_factor
 
-        if event.num == 3:  # Jobb klikk = panning
-            self.is_panning = True
-            self.last_x, self.last_y = event.x, event.y
+        
+        if self.bg_removal_mode:
+            self.bg_start_x = img_x
+            self.bg_start_y = img_y
             return
 
+        
         if self.text_mode.get():
             self.place_text_at(img_x, img_y)
             return
 
+        
         if not self.drawing:
             return
 
-        color = "white" if self.tool_var.get() == "eraser" else self.draw_color
-        self.draw_overlay = Image.new("RGBA", self.current_image.size, (0,0,0,0))
-        self.draw = ImageDraw.Draw(self.draw_overlay)
+        tool = self.tool_var.get()
+
+        # For eraser, work directly on permanent layer
+        if tool == "eraser":
+            if self.permanent_drawings is None:
+                self.permanent_drawings = Image.new("RGBA", self.current_image.size, (0,0,0,0))
+
+            # Create temporary overlay for erasing
+            self.draw_overlay = Image.new("RGBA", self.current_image.size, (0,0,0,0))
+            self.draw = ImageDraw.Draw(self.permanent_drawings) 
+
+           
+            pixels = self.permanent_drawings.load()
+            for i in range(int(img_x - self.draw_size/2), int(img_x + self.draw_size/2)):
+                for j in range(int(img_y - self.draw_size/2), int(img_y + self.draw_size/2)):
+                    if 0 <= i < self.current_image.width and 0 <= j < self.current_image.height:
+                        # Check if within circle
+                        if (i - img_x)**2 + (j - img_y)**2 <= (self.draw_size/2)**2:
+                            pixels[i, j] = (0, 0, 0, 0)
+        else:
+           
+            color = self.draw_color
+            self.draw_overlay = Image.new("RGBA", self.current_image.size, (0,0,0,0))
+            self.draw = ImageDraw.Draw(self.draw_overlay)
+
+            if tool == "brush":
+                self.draw.ellipse([img_x - self.draw_size/2, img_y - self.draw_size/2,
+                                   img_x + self.draw_size/2, img_y + self.draw_size/2], fill=color)
+
         self.start_x = self.last_x = img_x
         self.start_y = self.last_y = img_y
-
-        tool = self.tool_var.get()
-        if tool in ["brush", "eraser"]:
-            self.draw.ellipse([img_x - self.draw_size/2, img_y - self.draw_size/2,
-                               img_x + self.draw_size/2, img_y + self.draw_size/2], fill=color)
-            self.update_image_display()
+        self.update_image_display()
 
     def on_drag(self, event):
         if not self.current_image:
             return
 
-        if self.is_panning:
-            dx = event.x - self.last_x
-            dy = event.y - self.last_y
-            self.pan_x += dx
-            self.pan_y += dy
-            self.last_x, self.last_y = event.x, event.y
-            self.update_image_display()
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        img_x = (canvas_x - self.pan_x) / self.zoom_factor
+        img_y = (canvas_y - self.pan_y) / self.zoom_factor
+
+        # Background removal selection visualization
+        if self.bg_removal_mode and self.bg_start_x is not None:
+            self.canvas.delete("bg_selection")
+            x1 = self.bg_start_x * self.zoom_factor + self.pan_x
+            y1 = self.bg_start_y * self.zoom_factor + self.pan_y
+            x2 = img_x * self.zoom_factor + self.pan_x
+            y2 = img_y * self.zoom_factor + self.pan_y
+            self.canvas.create_rectangle(x1, y1, x2, y2, outline="cyan", width=2, tags="bg_selection", dash=(5, 5))
             return
 
         if not self.drawing:
             return
 
-        canvas_x = self.canvas.canvasx(event.x)
-        canvas_y = self.canvas.canvasy(event.y)
-        img_x = canvas_x / self.zoom_factor + self.pan_x / self.zoom_factor
-        img_y = canvas_y / self.zoom_factor + self.pan_y / self.zoom_factor
-
         tool = self.tool_var.get()
-        color = "white" if tool == "eraser" else self.draw_color
 
-        if tool in ["brush", "eraser"]:
+        if tool == "eraser":
+            
+            pixels = self.permanent_drawings.load()
+
+            # Erase along the line from last position to current
+            steps = int(max(abs(img_x - self.last_x), abs(img_y - self.last_y)))
+            for step in range(steps + 1):
+                t = step / max(steps, 1)
+                x = self.last_x + t * (img_x - self.last_x)
+                y = self.last_y + t * (img_y - self.last_y)
+
+                for i in range(int(x - self.draw_size/2), int(x + self.draw_size/2)):
+                    for j in range(int(y - self.draw_size/2), int(y + self.draw_size/2)):
+                        if 0 <= i < self.current_image.width and 0 <= j < self.current_image.height:
+                            if (i - x)**2 + (j - y)**2 <= (self.draw_size/2)**2:
+                                pixels[i, j] = (0, 0, 0, 0)
+
+        elif tool == "brush":
+            color = self.draw_color
             self.draw.line([self.last_x, self.last_y, img_x, img_y], fill=color, width=self.draw_size)
             self.draw.ellipse([img_x - self.draw_size/2, img_y - self.draw_size/2,
                                img_x + self.draw_size/2, img_y + self.draw_size/2], fill=color)
+
         self.last_x, self.last_y = img_x, img_y
         self.update_image_display()
 
     def on_release(self, event):
-        self.is_panning = False
-        if not self.current_image or not self.drawing or not hasattr(self, 'start_x'):
+        if not self.current_image:
             return
 
         canvas_x = self.canvas.canvasx(event.x)
         canvas_y = self.canvas.canvasy(event.y)
-        img_x = canvas_x / self.zoom_factor + self.pan_x / self.zoom_factor
-        img_y = canvas_y / self.zoom_factor + self.pan_y / self.zoom_factor
+        img_x = (canvas_x - self.pan_x) / self.zoom_factor
+        img_y = (canvas_y - self.pan_y) / self.zoom_factor
+
+        
+        if self.bg_removal_mode and self.bg_start_x is not None:
+            self.canvas.delete("bg_selection")
+            x1, y1 = int(min(self.bg_start_x, img_x)), int(min(self.bg_start_y, img_y))
+            x2, y2 = int(max(self.bg_start_x, img_x)), int(max(self.bg_start_y, img_y))
+
+            # Ensure coordinates are within image bounds
+            x1 = max(0, x1)
+            y1 = max(0, y1)
+            x2 = min(self.current_image.width, x2)
+            y2 = min(self.current_image.height, y2)
+
+            if x2 > x1 and y2 > y1:
+                if hasattr(self, 'bg_removal_method') and self.bg_removal_method == 'grabcut':
+                    self.process_grabcut_removal((x1, y1, x2, y2))
+
+            self.bg_removal_mode = False
+            self.bg_start_x = self.bg_start_y = None
+            self.canvas.config(cursor="")
+            return
+
+        # Don't process drawing if not in drawing mode or no start position
+        if not self.drawing or not hasattr(self, 'start_x'):
+            return
 
         tool = self.tool_var.get()
-        color = "white" if tool == "eraser" else self.draw_color
-        fill_color = color + "FF" if self.fill_var.get() and tool != "eraser" else None
+
+       
+        if tool == "eraser":
+            self.finalize_drawing()
+            return
+
+        color = self.draw_color
+        fill_color = color if self.fill_var.get() else None
 
         if tool == "line":
             self.draw.line([self.start_x, self.start_y, img_x, img_y], fill=color, width=self.draw_size)
@@ -257,7 +366,6 @@ class PictureEditor(ctk.CTk):
                                  max(self.start_x, img_x), max(self.start_y, img_y)],
                                 outline=color, width=self.draw_size, fill=fill_color)
         elif tool == "circle":
-            # Ellipszis a két pont között
             bbox = [min(self.start_x, img_x), min(self.start_y, img_y),
                     max(self.start_x, img_x), max(self.start_y, img_y)]
             self.draw.ellipse(bbox, outline=color, width=self.draw_size, fill=fill_color)
@@ -285,49 +393,102 @@ class PictureEditor(ctk.CTk):
 
     
     def open_image(self):
-        path = filedialog.askopenfilename(filetypes=[("Képek", "*.png *.jpg *.jpeg *.bmp *.tiff *.webp")])
-        if path:
-            try:
-                self.original_image = Image.open(path).convert("RGB")
-                self.current_image = self.original_image.copy()
-                self.history = [np.array(self.current_image)]
-                self.history_index = 0
-                self.zoom_factor = 1.0
-                self.pan_x = self.pan_y = 0
-                self.update_image_display()
-                messagebox.showinfo("Siker!", "Kép betöltve!")
-            except Exception as e:
-                messagebox.showerror("Hiba", f"Nem sikerült betölteni: {e}")
+       
+     path = filedialog.askopenfilename(filetypes=[("Képek", "*.png *.jpg *.jpeg *.bmp *.tiff *.webp")])
+     if path:
+         try:
+             self.original_image = Image.open(path).convert("RGB")
+             self.current_image = self.original_image.copy()
+             self.permanent_drawings = None
+             self.has_transparency = False
+
+             
+             self.history = [{
+                 'image': np.array(self.current_image),
+                 'drawings': None,
+                 'has_transparency': False
+             }]
+             self.history_index = 0
+             self.zoom_factor = 1.0
+             self.pan_x = self.pan_y = 0
+             self.update_image_display()
+             messagebox.showinfo("Siker!", "Kép betöltve!")
+         except Exception as e:
+             messagebox.showerror("Hiba", f"Nem sikerült betölteni: {e}")
 
     def save_state(self):
         if self.current_image:
             self.history = self.history[:self.history_index + 1]
-            self.history.append(np.array(self.current_image))
-            self.history_index += 1
-            if len(self.history) > 30:
-                self.history.pop(0)
-                self.history_index -= 1
+        # Save both the image and the drawing layer
+        state = {
+            'image': np.array(self.current_image),
+            'drawings': self.permanent_drawings.copy() if self.permanent_drawings else None,
+            'has_transparency': self.has_transparency
+        }
+        self.history.append(state)
+        self.history_index += 1
+        if len(self.history) > 30:
+            self.history.pop(0)
+            self.history_index -= 1
+
+    def sync_drawing_layer_size(self):
+        """Ensure permanent_drawings matches current_image size"""
+        if self.permanent_drawings and self.current_image:
+            if self.permanent_drawings.size != self.current_image.size:
+                old_drawings = self.permanent_drawings
+                self.permanent_drawings = Image.new("RGBA", self.current_image.size, (0,0,0,0))
+               
+                self.permanent_drawings.paste(old_drawings, (0, 0), old_drawings)
 
     def undo(self):
-        if self.history_index > 0:
-            self.history_index -= 1
-            self.current_image = Image.fromarray(self.history[self.history_index])
-            self.update_image_display()
+       
+        if  self.history_index > 0:
+          self.history_index -= 1
+          state = self.history[self.history_index]
+          
+          
+          if isinstance(state, dict):
+              self.current_image = Image.fromarray(state['image'])
+              self.permanent_drawings = state['drawings'].copy() if state['drawings'] else None
+              self.has_transparency = state.get('has_transparency', False)
+          else:
+             
+              self.current_image = Image.fromarray(state)
+              
+          self.update_image_display()
 
     def redo(self):
         if self.history_index < len(self.history) - 1:
             self.history_index += 1
-            self.current_image = Image.fromarray(self.history[self.history_index])
+            state = self.history[self.history_index]
+
+            
+            if isinstance(state, dict):
+                self.current_image = Image.fromarray(state['image'])
+                self.permanent_drawings = state['drawings'].copy() if state['drawings'] else None
+                self.has_transparency = state.get('has_transparency', False)
+            else:
+                
+                self.current_image = Image.fromarray(state)
+
             self.update_image_display()
 
     def reset_image(self):
-        if self.original_image:
-            self.current_image = self.original_image.copy()
-            self.history = [np.array(self.current_image)]
-            self.history_index = 0
-            self.zoom_factor = 1.0
-            self.pan_x = self.pan_y = 0
-            self.update_image_display()
+     if self.original_image:
+         self.current_image = self.original_image.copy()
+         self.permanent_drawings = None
+         self.has_transparency = False
+
+         
+         self.history = [{
+             'image': np.array(self.current_image),
+             'drawings': None,
+             'has_transparency': False
+         }]
+         self.history_index = 0
+         self.zoom_factor = 1.0
+         self.pan_x = self.pan_y = 0
+         self.update_image_display()
     
     def update_image_display(self):
         if not self.current_image:
@@ -336,8 +497,40 @@ class PictureEditor(ctk.CTk):
             return
 
         img = self.current_image.copy()
+
+        # If image has transparency, show it with checkerboard pattern
+        if self.has_transparency or (img.mode == 'RGBA' and img.getchannel('A').getextrema()[0] < 255):
+            # Create checkerboard background
+            checker_size = 20
+            w, h = img.size
+            checkerboard = Image.new('RGB', (w, h), 'white')
+            draw = ImageDraw.Draw(checkerboard)
+            for y in range(0, h, checker_size):
+                for x in range(0, w, checker_size):
+                    if (x // checker_size + y // checker_size) % 2 == 0:
+                        draw.rectangle([x, y, x + checker_size, y + checker_size], fill='#CCCCCC')
+
+          
+            img = Image.alpha_composite(checkerboard.convert('RGBA'), img.convert('RGBA'))
+        else:
+            img = img.convert('RGBA')
+
+       
+        if self.permanent_drawings:
+            if self.permanent_drawings.size == img.size:
+                img = Image.alpha_composite(img, self.permanent_drawings)
+            else:
+                
+                self.sync_drawing_layer_size()
+                if self.permanent_drawings.size == img.size:
+                    img = Image.alpha_composite(img, self.permanent_drawings)
+
+        # Add current drawing overlay (while drawing) - check size first
         if self.draw_overlay:
-            img = Image.alpha_composite(img.convert("RGBA"), self.draw_overlay).convert("RGB")
+            if self.draw_overlay.size == img.size:
+                img = Image.alpha_composite(img, self.draw_overlay)
+
+        img = img.convert('RGB')
 
         w = int(img.width * self.zoom_factor)
         h = int(img.height * self.zoom_factor)
@@ -363,24 +556,132 @@ class PictureEditor(ctk.CTk):
     def save_image(self):
         if not self.current_image:
             return
-        path = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg")])
+
+        
+        if self.has_transparency or self.current_image.mode == 'RGBA':
+            path = filedialog.asksaveasfilename(
+                defaultextension=".png", 
+                filetypes=[("PNG (támogatja az átlátszóságot)", "*.png"), ("JPEG", "*.jpg")]
+            )
+        else:
+            path = filedialog.asksaveasfilename(
+                defaultextension=".png", 
+                filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg")]
+            )
+
         if path:
-            self.current_image.save(path)
+            if path.lower().endswith('.jpg') or path.lower().endswith('.jpeg'):
+                # Convert RGBA to RGB for JPEG
+                if self.current_image.mode == 'RGBA':
+                    rgb_image = Image.new('RGB', self.current_image.size, (255, 255, 255))
+                    rgb_image.paste(self.current_image, mask=self.current_image.split()[3])
+                    rgb_image.save(path, quality=95)
+                else:
+                    self.current_image.save(path, quality=95)
+            else:
+                self.current_image.save(path)
             messagebox.showinfo("Mentve", f"Kép elmentve: {os.path.basename(path)}")
 
-    def remove_background(self):
-        if not self.current_image:
-            return
-        self.save_state()
-        try:
-            session = new_session("u2net")
-            output = remove(self.current_image, session=session)
-            bg = Image.new("RGB", output.size, (255, 255, 255))
-            self.current_image = Image.alpha_composite(bg.convert("RGBA"), output.convert("RGBA")).convert("RGB")
-            self.update_image_display()
-            messagebox.showinfo("Kész!", "Háttér sikeresen eltávolítva!")
-        except Exception as e:
-            messagebox.showerror("Hiba", f"Háttéreltávolítás sikertelen: {e}")
+    def remove_background_grabcut(self):
+     if not self.current_image:
+         return
+
+     
+     if self.permanent_drawings:
+         merge = messagebox.askyesno(
+             "Rajzolt elemek",
+             "Van rajzolt tartalom a képen.\n\n"
+             "Szeretnéd egyesíteni a rajzokat a képpel a háttér eltávolítása előtt?\n\n"
+             "Igen = Rajzok megmaradnak\n"
+             "Nem = Csak a kép háttere törlődik (rajzok eltűnnek)"
+         )
+
+         if merge:
+             # Merge drawings into the image
+             temp_img = self.current_image.convert('RGBA')
+             temp_img = Image.alpha_composite(temp_img, self.permanent_drawings)
+             self.current_image = temp_img.convert('RGB')
+             self.permanent_drawings = None  # Clear drawings after merge
+
+     messagebox.showinfo(
+         "Háttér eltávolítás - GrabCut", 
+         "Húzz egy téglalapot a MEGTARTANI kívánt objektum körül!\n\n"
+         "A téglalapon BELÜL lesz a főbb objektum.\n"
+         "A téglalapon KÍVÜL minden eltávolításra kerül."
+     )
+
+     self.bg_removal_mode = True
+     self.bg_removal_method = 'grabcut'
+     self.canvas.config(cursor="crosshair")
+
+    def process_grabcut_removal(self, bbox):
+     """Use GrabCut algorithm for background removal"""
+     self.save_state()
+     try:
+         # Merge permanent drawings into current image for processing
+         work_image = self.current_image.copy()
+         if self.permanent_drawings:
+             work_image = work_image.convert('RGBA')
+             work_image = Image.alpha_composite(work_image, self.permanent_drawings)
+             work_image = work_image.convert('RGB')
+
+         x1, y1, x2, y2 = bbox
+
+        
+         img = np.array(work_image)
+
+         
+         mask = np.zeros(img.shape[:2], np.uint8)
+
+        
+         bgd_model = np.zeros((1, 65), np.float64)
+         fgd_model = np.zeros((1, 65), np.float64)
+
+         
+         rect = (x1, y1, x2 - x1, y2 - y1)
+
+         
+         cv2.grabCut(img, mask, rect, bgd_model, fgd_model, 5, cv2.GC_INIT_WITH_RECT)
+
+         # Create mask where 0 and 2 are background, 1 and 3 are foreground
+         mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype('uint8')
+
+         
+         choice = messagebox.askquestion(
+             "Háttér színe",
+             "Átlátszó hátteret szeretnél?\n"
+             "Igen = Átlátszó\n"
+             "Nem = Válassz színt"
+         )
+
+         if choice == 'yes':
+             # Create RGBA image with transparency
+             img_rgba = cv2.cvtColor(img, cv2.COLOR_RGB2RGBA)
+             img_rgba[:, :, 3] = mask2 * 255
+             self.current_image = Image.fromarray(img_rgba, 'RGBA')
+             self.has_transparency = True
+         else:
+             bg_color = colorchooser.askcolor(title="Válassz háttérszínt", initialcolor="#FFFFFF")[1]
+             if bg_color:
+                 # Convert hex to RGB
+                 bg_rgb = tuple(int(bg_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+
+                 # Apply mask and background color
+                 result = img * mask2[:, :, np.newaxis]
+                 background = np.full_like(img, bg_rgb)
+                 result = np.where(mask2[:, :, np.newaxis] == 1, result, background)
+
+                 self.current_image = Image.fromarray(result.astype('uint8'))
+                 self.has_transparency = False
+
+         
+         self.permanent_drawings = None
+
+         self.update_image_display()
+         messagebox.showinfo("Kész!", "Háttér sikeresen eltávolítva!")
+
+     except Exception as e:
+         messagebox.showerror("Hiba", f"GrabCut sikertelen: {e}")
     
     def extract_text(self):
         if not self.current_image:
@@ -407,6 +708,7 @@ class PictureEditor(ctk.CTk):
         if len(result.shape) == 2:
             result = cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
         self.current_image = Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+        self.sync_drawing_layer_size()  # Add this line
         self.update_image_display()
 
     def apply_grayscale(self): self.apply_filter(lambda x: cv2.cvtColor(x, cv2.COLOR_BGR2GRAY))
@@ -420,13 +722,21 @@ class PictureEditor(ctk.CTk):
         if self.current_image:
             self.save_state()
             self.current_image = self.current_image.rotate(-angle, expand=True)
+           
+            if self.permanent_drawings:
+                self.permanent_drawings = self.permanent_drawings.rotate(-angle, expand=True)
+            self.sync_drawing_layer_size()
+            self.save_state()
             self.update_image_display()
 
     def flip_horizontal(self):
         if self.current_image:
             self.save_state()
             self.current_image = ImageOps.mirror(self.current_image)
+            if self.permanent_drawings:
+                self.permanent_drawings = ImageOps.mirror(self.permanent_drawings)
             self.update_image_display()
+            
     def resize_image(self):
         if not self.current_image:
             return
@@ -438,6 +748,8 @@ class PictureEditor(ctk.CTk):
             return
         self.save_state()
         self.current_image = self.current_image.resize((w, h), Image.Resampling.LANCZOS)
+        if self.permanent_drawings:
+            self.permanent_drawings = self.permanent_drawings.resize((w, h), Image.Resampling.LANCZOS)
         self.update_image_display()
 
 if __name__ == "__main__":
