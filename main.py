@@ -6,11 +6,10 @@ import cv2
 import numpy as np
 import pytesseract
 import os
-import io
-from rembg import remove, new_session
 
 
-pytesseract.pytesseract.tesseract_cmd = os.getenv('TESSERACT_CMD', '/usr/bin/tesseract')
+
+pytesseract.pytesseract.tesseract_cmd #= tesseract.exe path if needed
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
@@ -118,8 +117,8 @@ class PictureEditor(ctk.CTk):
                           ("Szépia", self.apply_sepia), ("Vintage", self.apply_vintage)]:
             ctk.CTkButton(self.sidebar, text=name, command=cmd).pack(pady=3, padx=20, fill="x")
 
-        ctk.CTkLabel(self.sidebar, text="AI & OCR", font=ctk.CTkFont(weight="bold")).pack(pady=(20,5), anchor="w", padx=20)
-        ctk.CTkButton(self.sidebar, text="Háttér eltávolítás (AI)", command=self.remove_background_grabcut, fg_color="purple").pack(pady=8, padx=20, fill="x")
+        ctk.CTkLabel(self.sidebar, text="Háttér eltávolítás & OCR", font=ctk.CTkFont(weight="bold")).pack(pady=(20,5), anchor="w", padx=20)
+        ctk.CTkButton(self.sidebar, text="Háttér eltávolítás", command=self.remove_background_grabcut, fg_color="purple").pack(pady=8, padx=20, fill="x")
         ctk.CTkButton(self.sidebar, text="Szöveg kinyerése (OCR)", command=self.extract_text).pack(pady=5, padx=20, fill="x")
 
         ctk.CTkLabel(self.sidebar, text="Visszaállítás", font=ctk.CTkFont(weight="bold")).pack(pady=(20,5), anchor="w", padx=20)
@@ -154,14 +153,14 @@ class PictureEditor(ctk.CTk):
         self.bind("<Control-s>", lambda e: self.save_image())
 
     def on_right_click(self, event):
-        """Handle right mouse button press for panning"""
+        
         self.is_panning = True
         self.last_x = event.x
         self.last_y = event.y
         self.canvas.config(cursor="fleur")
 
     def on_right_drag(self, event):
-        """Handle right mouse button drag for panning"""
+        
         if self.is_panning:
             dx = event.x - self.last_x
             dy = event.y - self.last_y
@@ -172,7 +171,7 @@ class PictureEditor(ctk.CTk):
             self.update_image_display()
 
     def on_right_release(self, event):
-        """Handle right mouse button release"""
+       
         self.is_panning = False
         self.canvas.config(cursor="")
 
@@ -432,7 +431,7 @@ class PictureEditor(ctk.CTk):
             self.history_index -= 1
 
     def sync_drawing_layer_size(self):
-        """Ensure permanent_drawings matches current_image size"""
+        
         if self.permanent_drawings and self.current_image:
             if self.permanent_drawings.size != self.current_image.size:
                 old_drawings = self.permanent_drawings
@@ -525,7 +524,7 @@ class PictureEditor(ctk.CTk):
                 if self.permanent_drawings.size == img.size:
                     img = Image.alpha_composite(img, self.permanent_drawings)
 
-        # Add current drawing overlay (while drawing) - check size first
+        # Add current drawing overlay
         if self.draw_overlay:
             if self.draw_overlay.size == img.size:
                 img = Image.alpha_composite(img, self.draw_overlay)
@@ -557,8 +556,17 @@ class PictureEditor(ctk.CTk):
         if not self.current_image:
             return
 
-        
-        if self.has_transparency or self.current_image.mode == 'RGBA':
+      
+        final_image = self.current_image.copy()
+
+        # Merge permanent drawings if they exist
+        if self.permanent_drawings:
+            if final_image.mode != 'RGBA':
+                final_image = final_image.convert('RGBA')
+            final_image = Image.alpha_composite(final_image, self.permanent_drawings)
+
+        # Determine file types based on transparency
+        if self.has_transparency or final_image.mode == 'RGBA':
             path = filedialog.asksaveasfilename(
                 defaultextension=".png", 
                 filetypes=[("PNG (támogatja az átlátszóságot)", "*.png"), ("JPEG", "*.jpg")]
@@ -572,28 +580,28 @@ class PictureEditor(ctk.CTk):
         if path:
             if path.lower().endswith('.jpg') or path.lower().endswith('.jpeg'):
                 # Convert RGBA to RGB for JPEG
-                if self.current_image.mode == 'RGBA':
-                    rgb_image = Image.new('RGB', self.current_image.size, (255, 255, 255))
-                    rgb_image.paste(self.current_image, mask=self.current_image.split()[3])
+                if final_image.mode == 'RGBA':
+                    rgb_image = Image.new('RGB', final_image.size, (255, 255, 255))
+                    rgb_image.paste(final_image, mask=final_image.split()[3])
                     rgb_image.save(path, quality=95)
                 else:
-                    self.current_image.save(path, quality=95)
+                    final_image.convert('RGB').save(path, quality=95)
             else:
-                self.current_image.save(path)
+                final_image.save(path)
             messagebox.showinfo("Mentve", f"Kép elmentve: {os.path.basename(path)}")
 
     def remove_background_grabcut(self):
      if not self.current_image:
          return
 
-     
+     # Handle drawings
      if self.permanent_drawings:
          merge = messagebox.askyesno(
              "Rajzolt elemek",
              "Van rajzolt tartalom a képen.\n\n"
              "Szeretnéd egyesíteni a rajzokat a képpel a háttér eltávolítása előtt?\n\n"
              "Igen = Rajzok megmaradnak\n"
-             "Nem = Csak a kép háttere törlődik (rajzok eltűnnek)"
+             "Nem = Rajzok eltávolítása"
          )
 
          if merge:
@@ -601,7 +609,10 @@ class PictureEditor(ctk.CTk):
              temp_img = self.current_image.convert('RGBA')
              temp_img = Image.alpha_composite(temp_img, self.permanent_drawings)
              self.current_image = temp_img.convert('RGB')
-             self.permanent_drawings = None  # Clear drawings after merge
+
+         # Clear drawings in both cases
+         self.permanent_drawings = None
+         self.update_image_display() 
 
      messagebox.showinfo(
          "Háttér eltávolítás - GrabCut", 
@@ -614,74 +625,62 @@ class PictureEditor(ctk.CTk):
      self.bg_removal_method = 'grabcut'
      self.canvas.config(cursor="crosshair")
 
+    
+
     def process_grabcut_removal(self, bbox):
-     """Use GrabCut algorithm for background removal"""
-     self.save_state()
-     try:
-         # Merge permanent drawings into current image for processing
-         work_image = self.current_image.copy()
-         if self.permanent_drawings:
-             work_image = work_image.convert('RGBA')
-             work_image = Image.alpha_composite(work_image, self.permanent_drawings)
-             work_image = work_image.convert('RGB')
+        """Use GrabCut algorithm for background removal"""
+        self.save_state()
+        try:
+            
+            work_image = self.current_image.copy()
 
-         x1, y1, x2, y2 = bbox
+            x1, y1, x2, y2 = bbox
 
-        
-         img = np.array(work_image)
+            img = np.array(work_image)
 
-         
-         mask = np.zeros(img.shape[:2], np.uint8)
+            mask = np.zeros(img.shape[:2], np.uint8)
 
-        
-         bgd_model = np.zeros((1, 65), np.float64)
-         fgd_model = np.zeros((1, 65), np.float64)
+            bgd_model = np.zeros((1, 65), np.float64)
+            fgd_model = np.zeros((1, 65), np.float64)
 
-         
-         rect = (x1, y1, x2 - x1, y2 - y1)
+            rect = (x1, y1, x2 - x1, y2 - y1)
 
-         
-         cv2.grabCut(img, mask, rect, bgd_model, fgd_model, 5, cv2.GC_INIT_WITH_RECT)
+            cv2.grabCut(img, mask, rect, bgd_model, fgd_model, 5, cv2.GC_INIT_WITH_RECT)
 
-         # Create mask where 0 and 2 are background, 1 and 3 are foreground
-         mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype('uint8')
+            mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype('uint8')
 
-         
-         choice = messagebox.askquestion(
-             "Háttér színe",
-             "Átlátszó hátteret szeretnél?\n"
-             "Igen = Átlátszó\n"
-             "Nem = Válassz színt"
-         )
+            choice = messagebox.askquestion(
+                "Háttér színe",
+                "Átlátszó hátteret szeretnél?\n"
+                "Igen = Átlátszó\n"
+                "Nem = Válassz színt"
+            )
 
-         if choice == 'yes':
-             # Create RGBA image with transparency
-             img_rgba = cv2.cvtColor(img, cv2.COLOR_RGB2RGBA)
-             img_rgba[:, :, 3] = mask2 * 255
-             self.current_image = Image.fromarray(img_rgba, 'RGBA')
-             self.has_transparency = True
-         else:
-             bg_color = colorchooser.askcolor(title="Válassz háttérszínt", initialcolor="#FFFFFF")[1]
-             if bg_color:
-                 # Convert hex to RGB
-                 bg_rgb = tuple(int(bg_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+            if choice == 'yes':
+                img_rgba = cv2.cvtColor(img, cv2.COLOR_RGB2RGBA)
+                img_rgba[:, :, 3] = mask2 * 255
+                self.current_image = Image.fromarray(img_rgba, 'RGBA')
+                self.has_transparency = True
+            else:
+                bg_color = colorchooser.askcolor(title="Válassz háttérszínt", initialcolor="#FFFFFF")[1]
+                if bg_color:
+                    bg_rgb = tuple(int(bg_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
 
-                 # Apply mask and background color
-                 result = img * mask2[:, :, np.newaxis]
-                 background = np.full_like(img, bg_rgb)
-                 result = np.where(mask2[:, :, np.newaxis] == 1, result, background)
+                    result = img * mask2[:, :, np.newaxis]
+                    background = np.full_like(img, bg_rgb)
+                    result = np.where(mask2[:, :, np.newaxis] == 1, result, background)
 
-                 self.current_image = Image.fromarray(result.astype('uint8'))
-                 self.has_transparency = False
+                    self.current_image = Image.fromarray(result.astype('uint8'))
+                    self.has_transparency = False
 
-         
-         self.permanent_drawings = None
+            # Ensure drawings are cleared
+            self.permanent_drawings = None
 
-         self.update_image_display()
-         messagebox.showinfo("Kész!", "Háttér sikeresen eltávolítva!")
+            self.update_image_display()
+            messagebox.showinfo("Kész!", "Háttér sikeresen eltávolítva!")
 
-     except Exception as e:
-         messagebox.showerror("Hiba", f"GrabCut sikertelen: {e}")
+        except Exception as e:
+            messagebox.showerror("Hiba", f"GrabCut sikertelen: {e}")
     
     def extract_text(self):
         if not self.current_image:
