@@ -208,6 +208,330 @@ class PictureEditor(ctk.CTk):
 
         self.refresh_layers_panel()
 
+    def setup_bindings(self):
+        self.canvas.bind('<ButtonPress-1>', self.on_click)
+        self.canvas.bind('<B1-Motion>', self.on_drag)
+        self.canvas.bind('<ButtonRelease-1>', self.on_release)
+        self.canvas.bind('<ButtonPress-3>', self.on_right_click)
+        self.canvas.bind('<B3-Motion>', self.on_right_drag)
+        self.canvas.bind('<ButtonRelease-3>', self.on_right_release)
+        self.canvas.bind('<MouseWheel>', self.on_mousewheel)
+        self.canvas.bind('<Button-4>', lambda e: self.zoom(1.1))
+        self.canvas.bind('<Button-5>', lambda e: self.zoom(0.9))
+
+        self.bind('<Control-z>', lambda e: self.undo())
+        self.bind('<Control-y>', lambda e: self.redo())
+        self.bind('<Control-o>', lambda e: self.open_image())
+        self.bind('<Control-s>', lambda e: self.save_image())
+        self.bind('<Control-Shift-x>', lambda e: self.toggle_crop_mode())
+
+    def get_drawings_layer(self):
+        for idx in range(len(self.layers) - 1, 0, -1):
+            if self.layers[idx].get('is_drawing_layer'):
+                return self.layers[idx], idx
+        for idx in range(len(self.layers) - 1, 0, -1):
+            if self.layers[idx]['name'].lower().startswith('draw'):
+                return self.layers[idx], idx
+        return None, None
+
+    def compose_layers(self):
+        if not self.layers:
+            return None
+        if self.base_cache is not None and not self.layers_dirty:
+            if self.draw_overlay:
+                overlay = self.draw_overlay
+                if overlay.size != self.base_cache.size:
+                    overlay = overlay.resize(self.base_cache.size, Image.Resampling.BILINEAR)
+                return Image.alpha_composite(self.base_cache, overlay)
+            else:
+                return self.base_cache
+        # recompose base
+        base = self.layers[0]['image'].copy()
+        if self.preview_adjustments:
+            base = self.apply_adjustments_to_image(base)
+        composited = base.convert('RGBA')
+        for layer in self.layers[1:]:
+            if not layer['visible']:
+                continue
+            top = layer['image']
+            if top.size != composited.size:
+                top = top.resize(composited.size, Image.Resampling.BILINEAR)
+            composited = self.blend_images(composited, top, layer['blend_mode'], layer['opacity'])
+        self.base_cache = composited
+        self.layers_dirty = False
+        if self.draw_overlay:
+            overlay = self.draw_overlay
+            if overlay.size != composited.size:
+                overlay = overlay.resize(composited.size, Image.Resampling.BILINEAR)
+            return Image.alpha_composite(composited, overlay)
+        else:
+            return composited
+
+    def blend_images(self, base_img, top_img, mode='normal', opacity=1.0):
+        base_arr = np.array(base_img.convert('RGBA')).astype(np.float32)
+        top_arr = np.array(top_img.convert('RGBA')).astype(np.float32)
+        if opacity < 1.0:
+            top_arr[..., 3] = top_arr[..., 3] * opacity
+        A = base_arr[..., :3]
+        B = top_arr[..., :3]
+        if mode == 'multiply':
+            C = (A * B) / 255.0
+        elif mode == 'screen':
+            C = 255.0 - ((255.0 - A) * (255.0 - B) / 255.0)
+        elif mode == 'overlay':
+            mask = A <= 128
+            C = np.zeros_like(A)
+            C[mask] = (2 * A[mask] * B[mask] / 255.0)
+            C[~mask] = 255.0 - (2 * (255.0 - A[~mask]) * (255.0 - B[~mask]) / 255.0)
+        else:
+            C = B
+        aA = base_arr[..., 3] / 255.0
+        aB = top_arr[..., 3] / 255.0
+        aOut = aB + aA * (1 - aB)
+        out_rgb = np.zeros_like(A)
+        nz = aOut > 0
+        out_rgb[nz] = ((C * aB[..., None] + A * aA[..., None] * (1 - aB[..., None]))[nz] / aOut[nz, None])
+        out_rgb[~nz] = 0
+        out_alpha = (aOut * 255.0).clip(0,255)
+        out = np.dstack((out_rgb, out_alpha))
+        out = np.clip(out, 0, 255).astype(np.uint8)
+        return Image.fromarray(out, mode='RGBA')
+
+    def refresh_layers_panel(self):
+        # Skip refresh if nothing changed
+        if not self.layer_panel_dirty and self.layers_frame.winfo_children():
+            return
+        for widget in self.layers_frame.winfo_children():
+            widget.destroy()
+        if not self.layers:
+            return
+        self.layer_panel_dirty = False
+        for idx in range(len(self.layers) - 1, -1, -1):
+            layer = self.layers[idx]
+            row = ctk.CTkFrame(self.layers_frame)
+            row.pack(fill='x', pady=2, padx=2)
+            if idx == self.active_layer_index:
+                row.configure(fg_color='#333333')
+            name_btn = ctk.CTkButton(row, text=layer['name'], width=100,
+                                     command=lambda i=idx: self.set_active_layer(i))
+            name_btn.pack(side='left', padx=2)
+            vis_var = tk.BooleanVar(value=layer['visible'])
+            ctk.CTkCheckBox(row, text='', variable=vis_var,
+                            command=lambda i=idx, v=vis_var: self.set_layer_visibility(i, v.get())).pack(side='left', padx=2)
+            opacity_var = tk.DoubleVar(value=layer['opacity'] * 100)
+            ctk.CTkSlider(row, from_=0, to=100, number_of_steps=100,
+                          variable=opacity_var,
+                          command=lambda v, i=idx: self.set_layer_opacity(i, float(v)/100)).pack(side='left', fill='x', expand=True, padx=2)
+            blend = ctk.CTkOptionMenu(row, values=['normal', 'multiply', 'screen', 'overlay'],
+                                      command=lambda m, i=idx: self.set_layer_blend_mode(i, m))
+            blend.set(layer.get('blend_mode', 'normal'))
+            blend.pack(side='left', padx=2)
+
+    def set_layer_visibility(self, index, visible):
+        self.layers[index]['visible'] = visible
+        self.layers_dirty = True
+        self.layer_panel_dirty = True
+        self.save_state()
+        self.update_image_display()
+        self.refresh_layers_panel()
+
+    def set_layer_opacity(self, index, opacity):
+        self.layers[index]['opacity'] = float(opacity)
+        self.layers_dirty = True
+        self.save_state()
+        self.update_image_display()
+
+    def set_layer_blend_mode(self, index, mode):
+        if mode in ['normal', 'multiply', 'screen', 'overlay']:
+            self.layers[index]['blend_mode'] = mode
+            self.layers_dirty = True
+            self.save_state()
+            self.update_image_display()
+
+    def set_active_layer(self, index):
+        self.active_layer_index = index
+        self.refresh_layers_panel()
+
+    def add_layer(self):
+        if not self.layers:
+            return
+        name = simpledialog.askstring('Új réteg', 'Réteg neve:')
+        if not name:
+            name = f'Réteg {len(self.layers)}'
+        size = self.layers[0]['image'].size
+        new_layer = {
+            'name': name,
+            'image': Image.new('RGBA', size, (0, 0, 0, 0)),
+            'visible': True,
+            'opacity': 1.0,
+            'blend_mode': 'normal',
+            'is_drawing_layer': False
+        }
+        self.layers.append(new_layer)
+        self.active_layer_index = len(self.layers) - 1
+        self.layers_dirty = True
+        self.layer_panel_dirty = True
+        self.save_state()
+        self.update_image_display()
+        self.refresh_layers_panel()
+
+    def delete_layer(self):
+        if self.active_layer_index == 0:
+            messagebox.showwarning('Figyelem', 'A háttérréteg nem törölhető.')
+            return
+        del self.layers[self.active_layer_index]
+        self.active_layer_index = max(0, self.active_layer_index - 1)
+        self.layers_dirty = True
+        self.layer_panel_dirty = True
+        self.save_state()
+        self.update_image_display()
+        self.refresh_layers_panel()
+
+    def move_layer_up(self):
+        idx = self.active_layer_index
+        if idx <= 1:
+            return
+        self.layers[idx], self.layers[idx - 1] = self.layers[idx - 1], self.layers[idx]
+        self.active_layer_index = idx - 1
+        self.layers_dirty = True
+        self.layer_panel_dirty = True
+        self.save_state()
+        self.update_image_display()
+        self.refresh_layers_panel()
+
+    def move_layer_down(self):
+        idx = self.active_layer_index
+        if idx >= len(self.layers) - 1 or idx == 0:
+            return
+        self.layers[idx], self.layers[idx + 1] = self.layers[idx + 1], self.layers[idx]
+        self.active_layer_index = idx + 1
+        self.layers_dirty = True
+        self.layer_panel_dirty = True
+        self.save_state()
+        self.update_image_display()
+        self.refresh_layers_panel()
+
+    def merge_down(self):
+        idx = self.active_layer_index
+        if idx == 0 or idx >= len(self.layers):
+            return
+        bottom = self.layers[idx - 1]
+        top = self.layers[idx]
+        if top['visible']:
+            bottom['image'] = self.blend_images(bottom['image'], top['image'], top['blend_mode'], top['opacity'])
+        del self.layers[idx]
+        self.active_layer_index = idx - 1
+        self.layers_dirty = True
+        self.layer_panel_dirty = True
+        self.save_state()
+        self.update_image_display()
+        self.refresh_layers_panel()
+
+    def flatten_all(self):
+        if not self.layers:
+            return
+        base = self.layers[0]['image'].copy()
+        for layer in self.layers[1:]:
+            if layer['visible']:
+                base = self.blend_images(base, layer['image'], layer['blend_mode'], layer['opacity'])
+        self.layers = [
+            {'name': 'Background', 'image': base, 'visible': True, 'opacity': 1.0, 'blend_mode': 'normal', 'is_drawing_layer': False},
+            {'name': 'Drawings', 'image': Image.new('RGBA', base.size, (0,0,0,0)), 'visible': True, 'opacity': 1.0, 'blend_mode': 'normal', 'is_drawing_layer': True}
+        ]
+        self.active_layer_index = 0
+        self.layers_dirty = True
+        self.layer_panel_dirty = True
+        self.save_state()
+        self.update_image_display()
+        self.refresh_layers_panel()
+
+    def update_brush_size(self, val):
+        self.draw_size = int(float(val))
+        self.brush_size_label.configure(text=f'{self.draw_size} px')
+
+    def choose_draw_color(self):
+        color = colorchooser.askcolor(title='Válassz ecset/szöveg színt')[1]
+        if color:
+            self.draw_color = color
+
+    def choose_text_color(self):
+        color = colorchooser.askcolor(title='Szöveg színe')[1]
+        if color:
+            self.text_color = color
+
+    def create_initial_layers(self):
+        if not self.current_image:
+            return
+        base_rgb = self.current_image.convert('RGBA')
+        draw_layer = Image.new('RGBA', base_rgb.size, (0,0,0,0))
+        self.layers = [
+            {'name': 'Background', 'image': base_rgb, 'visible': True, 'opacity': 1.0, 'blend_mode': 'normal', 'is_drawing_layer': False},
+            {'name': 'Drawings', 'image': draw_layer, 'visible': True, 'opacity': 1.0, 'blend_mode': 'normal', 'is_drawing_layer': True}
+        ]
+        self.active_layer_index = 0
+        self.refresh_layers_panel()
+
+    def save_state(self):
+        if not self.layers:
+            return
+        self.history = self.history[:self.history_index + 1]
+        layers_copy = []
+        for layer in self.layers:
+            layers_copy.append({
+                'name': layer['name'],
+                'image': layer['image'].copy(),
+                'visible': layer['visible'],
+                'opacity': layer['opacity'],
+                'blend_mode': layer['blend_mode'],
+                'is_drawing_layer': layer.get('is_drawing_layer', False)
+            })
+        state = {
+            'layers': layers_copy,
+            'active_layer_index': self.active_layer_index,
+            'has_transparency': self.has_transparency,
+            'adj_brightness': self.adj_brightness,
+            'adj_contrast': self.adj_contrast,
+            'adj_saturation': self.adj_saturation,
+            'adj_sharpness': self.adj_sharpness
+        }
+        self.history.append(state)
+        self.history_index += 1
+        if len(self.history) > 30:
+            self.history.pop(0)
+            self.history_index -= 1
+
+    def undo(self):
+        if self.history_index > 0:
+            self.history_index -= 1
+            self.load_state(self.history[self.history_index])
+
+    def redo(self):
+        if self.history_index < len(self.history) - 1:
+            self.history_index += 1
+            self.load_state(self.history[self.history_index])
+
+    def load_state(self, state):
+        if not state:
+            return
+        self.layers = []
+        for layer in state.get('layers', []):
+            self.layers.append({
+                'name': layer['name'],
+                'image': layer['image'].copy(),
+                'visible': layer['visible'],
+                'opacity': layer['opacity'],
+                'blend_mode': layer['blend_mode'],
+                'is_drawing_layer': layer.get('is_drawing_layer', False)
+            })
+        self.active_layer_index = state.get('active_layer_index', 0)
+        self.has_transparency = state.get('has_transparency', False)
+        self.adj_brightness = state.get('adj_brightness', 1.0)
+        self.adj_contrast = state.get('adj_contrast', 1.0)
+        self.adj_saturation = state.get('adj_saturation', 1.0)
+        self.adj_sharpness = state.get('adj_sharpness', 1.0)
+        self.current_image = self.layers[0]['image'].copy() if self.layers else None
+        self.refresh_layers_panel()
+        self.update_image_display()
     
 
 if __name__ == '__main__':
