@@ -533,7 +533,209 @@ class PictureEditor(ctk.CTk):
         self.refresh_layers_panel()
         self.update_image_display()
     
+    def reset_image(self):
+        if self.original_image:
+            self.current_image = self.original_image.copy()
+            self.has_transparency = False
+            self.create_initial_layers()
+            self.history = []
+            self.history_index = -1
+            self.save_state()
+            self.zoom_factor = 1.0
+            self.pan_x = self.pan_y = 0
+            self.update_image_display()
 
+    def open_image(self):
+        path = filedialog.askopenfilename(filetypes=[('Képek', '*.png *.jpg *.jpeg *.bmp *.tiff *.webp')])
+        if path:
+            try:
+                self.original_image = Image.open(path).convert('RGB')
+                self.current_image = self.original_image.copy()
+                self.has_transparency = False
+                self.create_initial_layers()
+                self.history = []
+                self.history_index = -1
+                self.save_state()
+                self.zoom_factor = 1.0
+                self.pan_x = self.pan_y = 0
+                self.update_image_display()
+                messagebox.showinfo('Siker!', 'Kép betöltve!')
+            except Exception as e:
+                messagebox.showerror('Hiba', f'Nem sikerült betölteni: {e}')
+
+    def update_image_display(self):
+        self.canvas.delete('all')
+        if not self.layers:
+            self.canvas.create_text(500, 300, text='Nyiss meg egy képet a bal oldali gombbal!', fill='gray', font=('Arial', 24))
+            return
+        composed = self.compose_layers()
+        if composed is None:
+            return
+        if composed.mode != 'RGBA':
+            composed = composed.convert('RGBA')
+        if not self.has_transparency and composed.mode == 'RGBA':
+            if composed.getchannel('A').getextrema()[0] < 255:
+                self.has_transparency = True
+        display = composed.convert('RGB')
+        w = int(display.width * self.zoom_factor)
+        h = int(display.height * self.zoom_factor)
+        if w < 1 or h < 1:
+            return
+        # Use BILINEAR for preview (faster), LANCZOS only for exports
+        resample = Image.Resampling.BILINEAR if self.zoom_factor != 1.0 else Image.Resampling.LANCZOS
+        self.display_image = display.resize((w, h), resample)
+        self.photo = ImageTk.PhotoImage(self.display_image)
+        self.canvas.config(scrollregion=(0, 0, w, h))
+        self.canvas.create_image(self.pan_x, self.pan_y, image=self.photo, anchor='nw')
+
+    def on_right_click(self, event):
+        self.is_panning = True
+        self.last_x = event.x
+        self.last_y = event.y
+        self.canvas.config(cursor='fleur')
+
+    def on_right_drag(self, event):
+        if self.is_panning:
+            dx = event.x - self.last_x
+            dy = event.y - self.last_y
+            self.pan_x += dx
+            self.pan_y += dy
+            self.last_x = event.x
+            self.last_y = event.y
+            self.update_image_display()
+
+    def on_right_release(self, event):
+        self.is_panning = False
+        self.canvas.config(cursor='')
+
+    def on_click(self, event):
+        if not self.layers:
+            return
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        img_x = (canvas_x - self.pan_x) / self.zoom_factor
+        img_y = (canvas_y - self.pan_y) / self.zoom_factor
+        if self.crop_mode:
+            self.crop_start = (img_x, img_y)
+            self.crop_rect_id = None
+            return
+        if self.text_mode.get():
+            self.place_text_at(img_x, img_y)
+            return
+        if not self.draw_enabled.get():
+            return
+        tool = self.tool_var.get()
+        self.draw_overlay = Image.new('RGBA', self.layers[0]['image'].size, (0, 0, 0, 0))
+        self.current_draw = ImageDraw.Draw(self.draw_overlay)
+        self.start_x = img_x
+        self.start_y = img_y
+        self.last_x = img_x
+        self.last_y = img_y
+        if tool == 'brush':
+            self.current_draw.ellipse([img_x - self.draw_size/2, img_y - self.draw_size/2, img_x + self.draw_size/2, img_y + self.draw_size/2], fill=self.draw_color)
+        elif tool == 'eraser':
+            self.current_draw.ellipse([img_x - self.draw_size/2, img_y - self.draw_size/2, img_x + self.draw_size/2, img_y + self.draw_size/2], fill=(0, 0, 0, 0))
+        self.update_image_display()
+
+    def on_drag(self, event):
+        if not self.layers:
+            return
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        img_x = (canvas_x - self.pan_x) / self.zoom_factor
+        img_y = (canvas_y - self.pan_y) / self.zoom_factor
+        if self.crop_mode and self.crop_start:
+            x1, y1 = self.crop_start
+            x2, y2 = img_x, img_y
+            if self.crop_rect_id:
+                self.canvas.delete(self.crop_rect_id)
+            self.crop_rect_id = self.canvas.create_rectangle(x1 * self.zoom_factor + self.pan_x,
+                                                              y1 * self.zoom_factor + self.pan_y,
+                                                              x2 * self.zoom_factor + self.pan_x,
+                                                              y2 * self.zoom_factor + self.pan_y,
+                                                              dash=(6,4), outline='yellow')
+            return
+        if not self.draw_enabled.get():
+            return
+        tool = self.tool_var.get()
+        if tool == 'brush':
+            self.current_draw.line([self.last_x, self.last_y, img_x, img_y], fill=self.draw_color, width=self.draw_size)
+            self.current_draw.ellipse([img_x - self.draw_size/2, img_y - self.draw_size/2,
+                                       img_x + self.draw_size/2, img_y + self.draw_size/2], fill=self.draw_color)
+            self.last_x = img_x
+            self.last_y = img_y
+        elif tool == 'eraser':
+            self.current_draw.line([self.last_x, self.last_y, img_x, img_y], fill=(0, 0, 0, 0), width=self.draw_size)
+            self.current_draw.ellipse([img_x - self.draw_size/2, img_y - self.draw_size/2,
+                                       img_x + self.draw_size/2, img_y + self.draw_size/2], fill=(0, 0, 0, 0))
+            self.last_x = img_x
+            self.last_y = img_y
+        self.update_image_display()
+
+    def on_release(self, event):
+        if not self.layers:
+            return
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        img_x = (canvas_x - self.pan_x) / self.zoom_factor
+        img_y = (canvas_y - self.pan_y) / self.zoom_factor
+        if self.crop_mode and self.crop_start:
+            x1, y1 = self.crop_start
+            x2, y2 = img_x, img_y
+            self.canvas.delete(self.crop_rect_id)
+            self.crop_rect_id = None
+            self.crop_mode = False
+            if messagebox.askyesno('Crop', 'Crop to this region?'):
+                x1i = int(max(0, min(x1, x2)))
+                y1i = int(max(0, min(y1, y2)))
+                x2i = int(min(self.layers[0]['image'].width, max(x1, x2)))
+                y2i = int(min(self.layers[0]['image'].height, max(y1, y2)))
+                if x2i > x1i and y2i > y1i:
+                    self.save_state()
+                    for layer in self.layers:
+                        layer['image'] = layer['image'].crop((x1i, y1i, x2i, y2i))
+                    self.layers_dirty = True
+                    self.current_image = self.layers[0]['image'].copy()
+                    self.zoom_factor = 1.0
+                    self.pan_x = self.pan_y = 0
+                    self.update_image_display()
+            self.crop_start = None
+            return
+        if self.text_mode.get():
+            return
+        if not self.draw_enabled.get():
+            return
+        tool = self.tool_var.get()
+        if tool in ['brush', 'line', 'rectangle', 'circle', 'eraser'] and self.draw_overlay is not None:
+            if tool == 'line':
+                self.current_draw.line([self.start_x, self.start_y, img_x, img_y], fill=self.draw_color, width=self.draw_size)
+            elif tool == 'rectangle':
+                fill_color = self.draw_color if self.fill_var.get() else None
+                self.current_draw.rectangle([self.start_x, self.start_y, img_x, img_y], outline=self.draw_color,
+                                            width=self.draw_size, fill=fill_color)
+            elif tool == 'circle':
+                fill_color = self.draw_color if self.fill_var.get() else None
+                self.current_draw.ellipse([self.start_x, self.start_y, img_x, img_y], outline=self.draw_color,
+                                          width=self.draw_size, fill=fill_color)
+            self.finalize_drawing()
+
+    def finalize_drawing(self):
+        if self.draw_overlay is None:
+            return
+        layer, idx = self.get_drawings_layer()
+        if layer is None:
+            self.create_initial_layers()
+            layer, idx = self.get_drawings_layer()
+        if layer is None:
+            return
+        layer['image'] = Image.alpha_composite(layer['image'], self.draw_overlay)
+        self.draw_overlay = None
+        self.layers_dirty = True
+        self.save_state()
+        self.update_image_display()
+
+
+    
 if __name__ == '__main__':
     app = PictureEditor()
     app.mainloop()
