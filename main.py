@@ -734,6 +734,255 @@ class PictureEditor(ctk.CTk):
         self.save_state()
         self.update_image_display()
 
+    def place_text_at(self, x, y):
+        text = self.text_input.get().strip()
+        if not text:
+            return
+        size = simpledialog.askinteger("Betűméret", "Méret (10-200):", minvalue=10, maxvalue=200, initialvalue=50)
+        if not size:
+            return
+        try:
+            font = ImageFont.truetype("arial.ttf", size)
+        except:
+            font = ImageFont.load_default()
+        # Add to active layer
+        layer = self.layers[self.active_layer_index]
+        overlay = Image.new("RGBA", layer['image'].size, (0,0,0,0))
+        draw = ImageDraw.Draw(overlay)
+        fill_color = self.text_color
+        if isinstance(fill_color, str) and fill_color.startswith('#') and len(fill_color) == 7:
+            fill_color += 'FF'
+        draw.text((x, y), text, font=font, fill=fill_color,
+                  stroke_width=2, stroke_fill="black", anchor="mm")
+        layer['image'] = Image.alpha_composite(layer['image'], overlay)
+        self.layers_dirty = True
+        self.save_state()
+        self.update_image_display()
+
+    def toggle_drawing_mode(self):
+        self.drawing = self.draw_enabled.get()
+        if self.drawing:
+            tool_names = {'brush': 'Ecset', 'line': 'Vonal', 'rectangle': 'Téglalap', 'circle': 'Kör', 'eraser': 'Radír'}
+            tool = tool_names.get(self.tool_var.get(), 'Eszköz')
+            messagebox.showinfo('Rajzolás aktív!', f'{tool} mód bekapcsolva!\nBal kattintás + húzás: rajzolás\nJobb kattintás: mozgatás (pan)')
+
+    def toggle_crop_mode(self):
+        self.crop_mode = not self.crop_mode
+        self.canvas.config(cursor='crosshair' if self.crop_mode else '')
+        msg = 'Crop mode aktív' if self.crop_mode else 'Crop mode kikapcsolva'
+        messagebox.showinfo('Crop', msg)
+
+    def apply_filter(self, func):
+        if not self.layers:
+            return
+        self.save_state()
+        bg = self.layers[0]['image'].convert('RGB')
+        arr = cv2.cvtColor(np.array(bg), cv2.COLOR_RGB2BGR)
+        result = func(arr)
+        if len(result.shape) == 2:
+            result = cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
+        self.layers[0]['image'] = Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB)).convert('RGBA')
+        self.layers_dirty = True
+        self.current_image = self.layers[0]['image'].copy()
+        self.update_image_display()
+
+    def apply_grayscale(self):
+        self.apply_filter(lambda x: cv2.cvtColor(x, cv2.COLOR_BGR2GRAY))
+
+    def apply_blur(self):
+        self.apply_filter(lambda x: cv2.GaussianBlur(x, (25, 25), 0))
+
+    def apply_sharpen(self):
+        self.apply_filter(lambda x: cv2.filter2D(x, -1, np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]], np.float32)))
+
+    def apply_sepia(self):
+        self.apply_filter(lambda x: (cv2.transform(x, np.array([[0.272, 0.534, 0.131], [0.349, 0.686, 0.168], [0.393, 0.769, 0.189]], np.float32)) * 1.1).clip(0,255).astype(np.uint8))
+
+    def apply_vintage(self):
+        self.apply_filter(lambda x: cv2.add(x, np.random.randint(0, 40, (x.shape[0], x.shape[1], 3), dtype=np.uint8)))
+
+    def rotate(self, angle):
+        if not self.layers:
+            return
+        self.save_state()
+        for layer in self.layers:
+            layer['image'] = layer['image'].rotate(-angle, expand=True)
+        self.layers_dirty = True
+        self.current_image = self.layers[0]['image'].copy()
+        self.zoom_factor = 1.0
+        self.pan_x = self.pan_y = 0
+        self.update_image_display()
+
+    def flip_horizontal(self):
+        if not self.layers:
+            return
+        self.save_state()
+        for layer in self.layers:
+            layer['image'] = ImageOps.mirror(layer['image'])
+        self.layers_dirty = True
+        self.current_image = self.layers[0]['image'].copy()
+        self.update_image_display()
+
+    def resize_image(self):
+        if not self.layers:
+            return
+        w = simpledialog.askinteger('Szélesség', f'Új szélesség (jelenleg: {self.layers[0]['image'].width}):', minvalue=1)
+        if not w:
+            return
+        h = simpledialog.askinteger('Magasság', f'Új magasság (jelenleg: {self.layers[0]['image'].height}):', minvalue=1)
+        if not h:
+            return
+        self.save_state()
+        for layer in self.layers:
+            layer['image'] = layer['image'].resize((w, h), Image.Resampling.LANCZOS)
+        self.layers_dirty = True
+        self.current_image = self.layers[0]['image'].copy()
+        self.update_image_display()
+
+    def save_image(self):
+        if not self.layers:
+            return
+        final_image = self.compose_layers()
+        if final_image is None:
+            return
+        path = filedialog.asksaveasfilename(defaultextension='.png', filetypes=[('PNG', '*.png'), ('JPEG', '*.jpg')])
+        if not path:
+            return
+        # Use LANCZOS for high-quality exports
+        w = int(final_image.width)
+        h = int(final_image.height)
+        if w > 0 and h > 0:
+            final_image = final_image.resize((w, h), Image.Resampling.LANCZOS)
+        
+        if path.lower().endswith(('.jpg', '.jpeg')):
+            final_image.convert('RGB').save(path, quality=95)
+        else:
+            final_image.save(path)
+        messagebox.showinfo('Mentve', f'Kép elmentve: {os.path.basename(path)}')
+
+    def remove_background_grabcut(self):
+        if not self.layers:
+            return
+        draw_layer, _ = self.get_drawings_layer()
+        if draw_layer:
+            merge = messagebox.askyesno('Rajzolt elemek', 'Van rajzolt tartalom a képen.\n\nSzeretnéd egyesíteni a rajzokat a képpel a háttér eltávolítása előtt?\n\nIgen = Rajzok megmaradnak\nNem = Rajzok eltávolítása')
+            if merge:
+                self.layers[0]['image'] = Image.alpha_composite(self.layers[0]['image'].convert('RGBA'), draw_layer['image']).convert('RGBA')
+            draw_layer['image'] = Image.new('RGBA', self.layers[0]['image'].size, (0,0,0,0))
+        messagebox.showinfo('Háttér eltávolítás - GrabCut', 'Húzz egy téglalapot a MEGTARTANI kívánt objektum körül!\n\nA téglalapon BELÜL lesz a főbb objektum.\nA téglalapon KÍVÜL minden eltávolításra kerül.')
+        self.bg_removal_mode = True
+        self.bg_removal_method = 'grabcut'
+        self.canvas.config(cursor='crosshair')
+
+    def process_grabcut_removal(self, bbox):
+        if not self.layers:
+            return
+        # Run GrabCut in background thread to prevent UI blocking
+        def grabcut_thread():
+            try:
+                x1, y1, x2, y2 = bbox
+                img = np.array(self.layers[0]['image'].convert('RGB'))
+                mask = np.zeros(img.shape[:2], np.uint8)
+                bgd_model = np.zeros((1, 65), np.float64)
+                fgd_model = np.zeros((1, 65), np.float64)
+                rect = (x1, y1, x2-x1, y2-y1)
+                cv2.grabCut(img, mask, rect, bgd_model, fgd_model, 5, cv2.GC_INIT_WITH_RECT)
+                mask2 = np.where((mask==2)|(mask==0), 0, 1).astype('uint8')
+                self.after(0, lambda: self._finalize_grabcut(img, mask2))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror('Hiba', f'GrabCut sikertelen: {e}'))
+        
+        self.save_state()
+        threading.Thread(target=grabcut_thread, daemon=True).start()
+    
+    def _finalize_grabcut(self, img, mask2):
+        choice = messagebox.askquestion('Háttér színe', 'Átlátszó hátteret szeretnél?\nIgen = Átlátszó\nNem = Válassz színt')
+        if choice == 'yes':
+            img_rgba = cv2.cvtColor(img, cv2.COLOR_RGB2RGBA)
+            img_rgba[..., 3] = mask2*255
+            self.layers[0]['image'] = Image.fromarray(img_rgba, 'RGBA')
+            self.has_transparency = True
+        else:
+            bg_color = colorchooser.askcolor(title='Válassz háttérszínt', initialcolor='#FFFFFF')[1]
+            if bg_color:
+                bg_rgb = tuple(int(bg_color.lstrip('#')[i:i+2], 16) for i in (0,2,4))
+                result = img * mask2[..., None]
+                background = np.full_like(img, bg_rgb)
+                result = np.where(mask2[..., None] == 1, result, background)
+                self.layers[0]['image'] = Image.fromarray(result.astype('uint8'))
+                self.has_transparency = False
+        draw_layer, _ = self.get_drawings_layer()
+        if draw_layer:
+            draw_layer['image'] = Image.new('RGBA', self.layers[0]['image'].size, (0,0,0,0))
+        self.current_image = self.layers[0]['image'].copy()
+        self.layers_dirty = True
+        self.update_image_display()
+        messagebox.showinfo('Kész!', 'Háttér sikeresen eltávolítva!')
+
+    def extract_text(self):
+        if not self.layers:
+            return
+        # Run OCR in background thread to prevent UI blocking
+        def ocr_thread():
+            try:
+                img = self.compose_layers().convert('RGB')
+                text = pytesseract.image_to_string(img, lang='hun+eng')
+                self.after(0, lambda: self._show_ocr_result(text))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror('Hiba', f'OCR sikertelen: {e}'))
+        
+        threading.Thread(target=ocr_thread, daemon=True).start()
+    
+    def _show_ocr_result(self, text):
+        win = ctk.CTkToplevel(self)
+        win.title('Kinyert szöveg (OCR)')
+        win.geometry('800x600')
+        txt = ctk.CTkTextbox(win, wrap='word')
+        txt.pack(fill='both', expand=True, padx=10, pady=10)
+        txt.insert('end', text if text.strip() else '(Nincs felismerhető szöveg)')
+        win.mainloop()
+
+    def on_adjustment_change(self, name, value):
+        setattr(self, f'adj_{name}', float(value))
+        self.preview_adjustments = True
+        self.layers_dirty = True
+        
+        # Throttle preview updates to avoid excessive recomputing
+        if self.adjustment_timer is not None:
+            self.after_cancel(self.adjustment_timer)
+        
+        self.adjustment_timer = self.after(self.adjustment_throttle_ms, self.update_image_display)
+
+    def apply_adjustments_to_image(self, base_img):
+        img = base_img.convert('RGB')
+        img = ImageEnhance.Brightness(img).enhance(self.adj_brightness)
+        img = ImageEnhance.Contrast(img).enhance(self.adj_contrast)
+        img = ImageEnhance.Color(img).enhance(self.adj_saturation)
+        img = ImageEnhance.Sharpness(img).enhance(self.adj_sharpness)
+        return img.convert('RGBA')
+
+    def apply_adjustments(self):
+        if not self.layers:
+            return
+        self.save_state()
+        self.layers[0]['image'] = self.apply_adjustments_to_image(self.layers[0]['image'])
+        self.current_image = self.layers[0]['image'].copy()
+        self.preview_adjustments = False
+        self.layers_dirty = True
+        self.update_image_display()
+
+    def reset_adjustments(self):
+        self.adj_brightness = 1.0
+        self.adj_contrast = 1.0
+        self.adj_saturation = 1.0
+        self.adj_sharpness = 1.0
+        self.adj_brightness_slider.set(1.0)
+        self.adj_contrast_slider.set(1.0)
+        self.adj_saturation_slider.set(1.0)
+        self.adj_sharpness_slider.set(1.0)
+        self.preview_adjustments = False
+        self.update_image_display()
+
 
     
 if __name__ == '__main__':
