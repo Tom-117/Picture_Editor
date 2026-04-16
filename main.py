@@ -983,8 +983,188 @@ class PictureEditor(ctk.CTk):
         self.preview_adjustments = False
         self.update_image_display()
 
+    def open_batch_processing(self):
+        win = ctk.CTkToplevel(self)
+        win.title('Batch Processing')
+        win.geometry('500x700')
+        win.transient(self)
+        win.lift()
+        win.focus_force()
+        win.after(100, lambda: win.lift())
+        win.after(100, lambda: win.focus_force())
 
-    
+        scrollable_frame = ctk.CTkScrollableFrame(win)
+        scrollable_frame.pack(fill='both', expand=True, padx=10, pady=10)
+
+        input_path_var = tk.StringVar()
+        output_path_var = tk.StringVar()
+
+        def choose_input():
+            p = filedialog.askdirectory()
+            if p:
+                input_path_var.set(p)
+
+        def choose_output():
+            p = filedialog.askdirectory()
+            if p:
+                output_path_var.set(p)
+
+        ctk.CTkButton(scrollable_frame, text='Input mappa', command=choose_input).pack(pady=5, padx=10, fill='x')
+        ctk.CTkLabel(scrollable_frame, textvariable=input_path_var, wraplength=460).pack(pady=2, padx=10)
+        ctk.CTkButton(scrollable_frame, text='Output mappa', command=choose_output).pack(pady=5, padx=10, fill='x')
+        ctk.CTkLabel(scrollable_frame, textvariable=output_path_var, wraplength=460).pack(pady=2, padx=10)
+
+        ops = ['Grayscale', 'Blur', 'Sharpen', 'Sepia', 'Vintage', 'Resize', 'Rotate', 'Flip Horizontal', 'Brightness', 'Contrast']
+        op_vars = {op: tk.BooleanVar(value=False) for op in ops}
+        ops_frame = ctk.CTkScrollableFrame(scrollable_frame, height=180)
+        ops_frame.pack(pady=5, padx=10, fill='x')
+        for op in ops:
+            ctk.CTkCheckBox(ops_frame, text=op, variable=op_vars[op]).pack(anchor='w', padx=5, pady=2)
+
+        self.batch_blur_kernel = tk.IntVar(value=3)
+        blur_frame = ctk.CTkFrame(scrollable_frame)
+        blur_frame.pack(pady=5, padx=10, fill='x')
+        ctk.CTkLabel(blur_frame, text='Blur kernel').pack(anchor='w')
+        blur_label = ctk.CTkLabel(blur_frame, text='3')
+        blur_label.pack(anchor='e')
+        ctk.CTkSlider(scrollable_frame, from_=3, to=51, number_of_steps=24,
+                      command=lambda v: [self.batch_blur_kernel.set(int(max(3, int(float(v)) | 1))), blur_label.configure(text=str(int(max(3, int(float(v)) | 1))))]).pack(fill='x', padx=10)
+
+        self.batch_resize_width = tk.IntVar(value=800)
+        self.batch_resize_height = tk.IntVar(value=600)
+        rfrm = ctk.CTkFrame(scrollable_frame)
+        rfrm.pack(pady=5, padx=10, fill='x')
+        ctk.CTkLabel(rfrm, text='Width').pack(side='left', padx=5)
+        ctk.CTkEntry(rfrm, textvariable=self.batch_resize_width, width=80).pack(side='left', padx=5)
+        ctk.CTkLabel(rfrm, text='Height').pack(side='left', padx=5)
+        ctk.CTkEntry(rfrm, textvariable=self.batch_resize_height, width=80).pack(side='left', padx=5)
+
+        self.batch_rotate = tk.StringVar(value='90')
+        ctk.CTkOptionMenu(scrollable_frame, values=['90', '180', '270'], variable=self.batch_rotate).pack(pady=5, padx=10, fill='x')
+
+        self.batch_brightness = tk.DoubleVar(value=1.0)
+        brightness_frame = ctk.CTkFrame(scrollable_frame)
+        brightness_frame.pack(pady=5, padx=10, fill='x')
+        ctk.CTkLabel(brightness_frame, text='Brightness').pack(anchor='w')
+        brightness_label = ctk.CTkLabel(brightness_frame, text='1.00')
+        brightness_label.pack(anchor='e')
+        ctk.CTkSlider(scrollable_frame, from_=0.1, to=3.0, number_of_steps=58, variable=self.batch_brightness,
+                      command=lambda v: brightness_label.configure(text=f'{float(v):.2f}')).pack(fill='x', padx=10)
+
+        self.batch_contrast = tk.DoubleVar(value=1.0)
+        contrast_frame = ctk.CTkFrame(scrollable_frame)
+        contrast_frame.pack(pady=5, padx=10, fill='x')
+        ctk.CTkLabel(contrast_frame, text='Contrast').pack(anchor='w')
+        contrast_label = ctk.CTkLabel(contrast_frame, text='1.00')
+        contrast_label.pack(anchor='e')
+        ctk.CTkSlider(scrollable_frame, from_=0.1, to=3.0, number_of_steps=58, variable=self.batch_contrast,
+                      command=lambda v: contrast_label.configure(text=f'{float(v):.2f}')).pack(fill='x', padx=10)
+
+        self.batch_output_format = tk.StringVar(value='PNG')
+        fmt_frame = ctk.CTkFrame(scrollable_frame)
+        fmt_frame.pack(pady=5, padx=10, fill='x')
+        ctk.CTkRadioButton(fmt_frame, text='PNG', variable=self.batch_output_format, value='PNG').pack(side='left', padx=5)
+        ctk.CTkRadioButton(fmt_frame, text='JPEG', variable=self.batch_output_format, value='JPEG').pack(side='left', padx=5)
+
+        self.batch_quality = tk.IntVar(value=90)
+        ctk.CTkLabel(scrollable_frame, text='Quality').pack(anchor='w', padx=10)
+        ctk.CTkSlider(scrollable_frame, from_=60, to=100, number_of_steps=40, variable=self.batch_quality).pack(fill='x', padx=10)
+
+        self.batch_progress = ctk.CTkProgressBar(scrollable_frame)
+        self.batch_progress.pack(pady=5, padx=10, fill='x')
+        self.batch_status = ctk.CTkLabel(scrollable_frame, text='Készen áll')
+        self.batch_status.pack(pady=2, padx=10)
+
+        self.batch_result_box = ctk.CTkTextbox(scrollable_frame, height=120)
+        self.batch_result_box.pack(pady=5, padx=10, fill='both', expand=True)
+
+        def run_batch():
+            input_dir = input_path_var.get().strip()
+            output_dir = output_path_var.get().strip()
+            if not input_dir or not output_dir:
+                messagebox.showwarning('Hiba', 'Kérjük válassz input és output mappát.')
+                return
+            files = [os.path.join(input_dir, f) for f in os.listdir(input_dir)
+                     if os.path.splitext(f)[1].lower() in SUPPORTED_BATCH_FORMATS]
+            if not files:
+                messagebox.showinfo('Hiba', 'Nincs feldolgozható fájl a mappában.')
+                return
+            self.batch_cancel_event = threading.Event()
+            self.batch_progress.set(0)
+            self.batch_result_box.delete('0.0', 'end')
+            def process_file(file_path, index, total):
+                try:
+                    img = Image.open(file_path).convert('RGB')
+                    if op_vars['Grayscale'].get():
+                        img = ImageOps.grayscale(img).convert('RGB')
+                    if op_vars['Blur'].get():
+                        k = self.batch_blur_kernel.get() or 3
+                        if k % 2 == 0:
+                            k += 1
+                        img = img.filter(ImageFilter.GaussianBlur(radius=(k-1)/2))
+                    if op_vars['Sharpen'].get():
+                        img = ImageEnhance.Sharpness(img).enhance(2.0)
+                    if op_vars['Sepia'].get():
+                        sep = np.array(img)
+                        tr = (sep[...,0]*0.393 + sep[...,1]*0.769 + sep[...,2]*0.189)
+                        tg = (sep[...,0]*0.349 + sep[...,1]*0.686 + sep[...,2]*0.168)
+                        tb = (sep[...,0]*0.272 + sep[...,1]*0.534 + sep[...,2]*0.131)
+                        sep = np.stack([np.clip(tr,0,255), np.clip(tg,0,255), np.clip(tb,0,255)], axis=2).astype(np.uint8)
+                        img = Image.fromarray(sep)
+                    if op_vars['Vintage'].get():
+                        np_img = np.array(img)
+                        np_img[..., :3] = np.clip(np_img[..., :3] * 0.9 + 20, 0, 255).astype(np.uint8)
+                        img = Image.fromarray(np_img)
+                    if op_vars['Resize'].get():
+                        w = self.batch_resize_width.get(); h = self.batch_resize_height.get()
+                        if w > 0 and h > 0:
+                            img = img.resize((w, h), Image.Resampling.LANCZOS)
+                    if op_vars['Rotate'].get():
+                        angle = int(self.batch_rotate.get())
+                        img = img.rotate(-angle, expand=True)
+                    if op_vars['Flip Horizontal'].get():
+                        img = ImageOps.mirror(img)
+                    if op_vars['Brightness'].get():
+                        img = ImageEnhance.Brightness(img).enhance(self.batch_brightness.get())
+                    if op_vars['Contrast'].get():
+                        img = ImageEnhance.Contrast(img).enhance(self.batch_contrast.get())
+                    stem = os.path.splitext(os.path.basename(file_path))[0]
+                    out_ext = 'png' if self.batch_output_format.get() == 'PNG' else 'jpg'
+                    out_name = f'{stem}_edited.{out_ext}'
+                    out_path = os.path.join(output_dir, out_name)
+                    if out_ext == 'jpg':
+                        img.convert('RGB').save(out_path, quality=self.batch_quality.get())
+                    else:
+                        img.save(out_path)
+                    self.after(0, lambda: self.batch_result_box.insert('end', f'{file_path}: OK\n'))
+                except Exception as e:
+                    self.after(0, lambda: self.batch_result_box.insert('end', f'{file_path}: ERROR {e}\n'))
+                self.after(0, lambda: self.batch_status.configure(text=f'Processing: {os.path.basename(file_path)} ({index}/{total})'))
+                self.after(0, lambda: self.batch_progress.set(index / total))
+            def worker():
+                total = len(files)
+                for idx, f in enumerate(files, start=1):
+                    if self.batch_cancel_event.is_set():
+                        self.after(0, lambda: self.batch_status.configure(text='Cancelled'))
+                        break
+                    process_file(f, idx, total)
+                self.after(0, lambda: self.batch_status.configure(text='Batch Complete'))
+            threading.Thread(target=worker, daemon=True).start()
+        ctk.CTkButton(scrollable_frame, text='Start Batch Processing', command=run_batch).pack(pady=8, padx=10, fill='x')
+        ctk.CTkButton(scrollable_frame, text='Cancel', command=lambda: self.batch_cancel_event.set() if self.batch_cancel_event else None).pack(pady=2, padx=10, fill='x')
+
+    def on_mousewheel(self, event):
+        if event.delta > 0:
+            self.zoom(1.1)
+        else:
+            self.zoom(0.9)
+
+    def zoom(self, factor):
+        old = self.zoom_factor
+        self.zoom_factor = max(0.1, min(self.zoom_factor * factor, 10))
+        if self.zoom_factor != old:
+            self.update_image_display()
+             
 if __name__ == '__main__':
     app = PictureEditor()
     app.mainloop()
