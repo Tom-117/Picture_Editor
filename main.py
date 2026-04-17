@@ -826,10 +826,10 @@ class PictureEditor(ctk.CTk):
     def resize_image(self):
         if not self.layers:
             return
-        w = simpledialog.askinteger('Szélesség', f'Új szélesség (jelenleg: {self.layers[0]['image'].width}):', minvalue=1)
+        w = simpledialog.askinteger('Szélesség', f"Új szélesség (jelenleg: {self.layers[0]['image'].width}):", minvalue=1)
         if not w:
             return
-        h = simpledialog.askinteger('Magasság', f'Új magasság (jelenleg: {self.layers[0]['image'].height}):', minvalue=1)
+        h = simpledialog.askinteger('Magasság', f"Új magasság (jelenleg: {self.layers[0]['image'].height}):", minvalue=1)
         if not h:
             return
         self.save_state()
